@@ -105,13 +105,55 @@ def vigentes(fixos: list, dia: date) -> list:
     return [f for f in fixos if f.get("de", mes) <= mes <= f.get("ate", mes)]
 
 
-def numero_do_dia(saldo: float, fixos: list, dia: date) -> tuple[float, list, int]:
+def data_de(t: dict) -> date:
+    return datetime.fromisoformat(t["date"].replace("Z", "+00:00")).date()
+
+
+def debitos_do_mes(foto: dict, dia: date) -> list[float]:
+    """As saídas da conta corrente do dia 1 até o dia, em valor positivo."""
+    conta = next((c for c in foto["contas"] if c["type"] == "BANK"), None)
+    if conta is None:
+        return []
+    return [
+        abs(float(t["amount"]))
+        for t in foto["transacoes"][conta["id"]]
+        if float(t["amount"]) < 0
+        and (data_de(t).year, data_de(t).month) == (dia.year, dia.month)
+        and data_de(t) <= dia
+    ]
+
+
+def ids_quitados(fixos: list, debitos: list[float]) -> set[int]:
+    """Os fixos que um débito do mês já pagou, mesmo antes do dia agendado.
+
+    Débito e fixo casam pelo valor. Cada débito paga um fixo só, e o fixo mais cedo
+    no mês casa primeiro: com duas Magalis de R$ 300 e um Pix de R$ 300, a 1ª está
+    paga e a 2ª ainda falta.
+    """
+    sobra = list(debitos)
+    quitados = set()
+    for f in sorted(fixos, key=lambda f: int(f["dia"])):
+        casou = next(
+            (i for i, v in enumerate(sobra) if abs(v - float(f["valor"])) < 0.01), None
+        )
+        if casou is not None:
+            sobra.pop(casou)
+            quitados.add(id(f))
+    return quitados
+
+
+def numero_do_dia(
+    saldo: float, fixos: list, dia: date, debitos: list[float]
+) -> tuple[float, list, int]:
     """O quanto cabe por dia do dia seguinte até o fim do mês.
 
     A foto sai às 23h30, então o saldo já desconta o gasto e os fixos do próprio
     dia. Contar o dia de hoje de novo dividiria o saldo por um dia que já passou.
+    Um fixo pago antes do dia agendado também já saiu do saldo, então não conta.
     """
-    faltam = [f for f in vigentes(fixos, dia) if int(f["dia"]) > dia.day]
+    do_mes = vigentes(fixos, dia)
+    quitados = ids_quitados(do_mes, debitos)
+    faltam = [f for f in do_mes if int(f["dia"]) > dia.day and id(f) not in quitados]
     dias_no_mes = monthrange(dia.year, dia.month)[1]
     dias_restantes = max(dias_no_mes - dia.day, 1)
     total_fixos = sum(float(f["valor"]) for f in faltam)
@@ -130,7 +172,10 @@ def teto_de(dia: date, fixos: list) -> float | None:
     if not arquivo.exists():
         return None
     foto = json.loads(arquivo.read_text(encoding="utf-8"))
-    return numero_do_dia(saldo_em_conta(foto), fixos, dia - timedelta(days=1))[0]
+    anteontem = dia - timedelta(days=1)
+    return numero_do_dia(
+        saldo_em_conta(foto), fixos, anteontem, debitos_do_mes(foto, anteontem)
+    )[0]
 
 
 def relatorio(foto: dict, hoje: date) -> str:
@@ -140,19 +185,21 @@ def relatorio(foto: dict, hoje: date) -> str:
     cartao = next((c for c in foto["contas"] if c["type"] == "CREDIT"), None)
     saldo = saldo_em_conta(foto)
 
-    numero, faltam, dias_restantes = numero_do_dia(saldo, conf["fixos"], hoje)
+    numero, faltam, dias_restantes = numero_do_dia(
+        saldo, conf["fixos"], hoje, debitos_do_mes(foto, hoje)
+    )
     total_fixos = sum(float(f["valor"]) for f in faltam)
     dias_no_mes = monthrange(hoje.year, hoje.month)[1]
 
     ontem = hoje - timedelta(days=1)
     lancamentos = foto["transacoes"].get(conta["id"], []) if conta else []
 
-    def dia_de(t):
-        return datetime.fromisoformat(t["date"].replace("Z", "+00:00")).date()
-
     def eh_fixo(t):
         v = abs(float(t["amount"]))
-        return any(abs(v - float(f["valor"])) < 0.01 for f in vigentes(conf["fixos"], dia_de(t)))
+        return any(
+            abs(v - float(f["valor"])) < 0.01
+            for f in vigentes(conf["fixos"], data_de(t))
+        )
 
     def eh_gasto(t):
         """Poupanca e transferencia entre contas minhas nao sao gasto.
@@ -166,12 +213,12 @@ def relatorio(foto: dict, hoje: date) -> str:
     saidas_ontem = [
         t
         for t in lancamentos
-        if dia_de(t) == ontem and float(t["amount"]) < 0 and eh_gasto(t)
+        if data_de(t) == ontem and float(t["amount"]) < 0 and eh_gasto(t)
     ]
     nao_contados = [
         t
         for t in lancamentos
-        if dia_de(t) == ontem and float(t["amount"]) < 0 and not eh_gasto(t)
+        if data_de(t) == ontem and float(t["amount"]) < 0 and not eh_gasto(t)
     ]
     gasto_ontem = sum(-float(t["amount"]) for t in saidas_ontem)
 
@@ -223,8 +270,12 @@ def relatorio(foto: dict, hoje: date) -> str:
     if saidas_ontem:
         linhas += ["| Hora | Valor | O quê |", "|---|---:|---|"]
         for t in sorted(saidas_ontem, key=lambda x: x["date"]):
-            hora = datetime.fromisoformat(t["date"].replace("Z", "+00:00")).strftime("%H:%M")
-            linhas.append(f'| {hora} | {brl(-float(t["amount"]))} | {t["description"].strip()} |')
+            hora = datetime.fromisoformat(t["date"].replace("Z", "+00:00")).strftime(
+                "%H:%M"
+            )
+            linhas.append(
+                f"| {hora} | {brl(-float(t['amount']))} | {t['description'].strip()} |"
+            )
         linhas.append("")
     else:
         linhas += ["Nenhuma saída registrada.", ""]
@@ -236,14 +287,19 @@ def relatorio(foto: dict, hoje: date) -> str:
         ]
         for t in sorted(nao_contados, key=lambda x: x["date"]):
             linhas.append(
-                f'- R$ {brl(-float(t["amount"]))} · {t["description"].strip()} · _{t.get("category")}_'
+                f"- R$ {brl(-float(t['amount']))} · {t['description'].strip()} · _{t.get('category')}_"
             )
         linhas.append("")
 
     if faltam:
-        linhas += ["## Os fixos que faltam", "", "| Dia | Valor | O quê |", "|---:|---:|---|"]
+        linhas += [
+            "## Os fixos que faltam",
+            "",
+            "| Dia | Valor | O quê |",
+            "|---:|---:|---|",
+        ]
         for f in sorted(faltam, key=lambda x: int(x["dia"])):
-            linhas.append(f'| {f["dia"]} | {brl(float(f["valor"]))} | {f["nome"]} |')
+            linhas.append(f"| {f['dia']} | {brl(float(f['valor']))} | {f['nome']} |")
         linhas.append("")
 
     if cartao:
@@ -251,8 +307,8 @@ def relatorio(foto: dict, hoje: date) -> str:
         linhas += [
             "## Cartão",
             "",
-            f'**R$ {brl(float(cartao["balance"]))} em aberto.** Vencimento informado pelo banco: {cd.get("balanceDueDate", "?")}.',
-            f'Limite disponível: R$ {brl(float(cd.get("availableCreditLimit") or 0))} de R$ {brl(float(cd.get("creditLimit") or 0))}.',
+            f"**R$ {brl(float(cartao['balance']))} em aberto.** Vencimento informado pelo banco: {cd.get('balanceDueDate', '?')}.",
+            f"Limite disponível: R$ {brl(float(cd.get('availableCreditLimit') or 0))} de R$ {brl(float(cd.get('creditLimit') or 0))}.",
             "",
         ]
 
@@ -276,7 +332,9 @@ def main() -> int:
 
     SNAPSHOTS.mkdir(parents=True, exist_ok=True)
     alvo_json = SNAPSHOTS / f"{hoje.isoformat()}.json"
-    alvo_json.write_text(json.dumps(foto, ensure_ascii=False, indent=2), encoding="utf-8")
+    alvo_json.write_text(
+        json.dumps(foto, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     RELATORIOS.mkdir(parents=True, exist_ok=True)
     alvo_md = RELATORIOS / f"{hoje.isoformat()}.md"
@@ -291,5 +349,8 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except requests.HTTPError as e:
-        print(f"pluggy respondeu {e.response.status_code}: {e.response.text[:200]}", file=sys.stderr)
+        print(
+            f"pluggy respondeu {e.response.status_code}: {e.response.text[:200]}",
+            file=sys.stderr,
+        )
         raise SystemExit(1)
