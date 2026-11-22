@@ -244,3 +244,18 @@ def test_hora_do_gasto_sai_no_horario_de_porto_alegre(tmp_path, monkeypatch):
     }
     texto = diario.relatorio(foto, date(2026, 11, 20))
     assert "| 15:35 | 18,75 |" in texto
+
+
+def test_fixo_semanal_vale_em_cada_domingo_do_mes():
+    pai = {"nome": "Pai", "valor": 500.00, "semanal": "domingo"}
+    dias = sorted(f["dia"] for f in diario.vigentes([pai], date(2026, 12, 10)))
+    assert dias == [6, 13, 20, 27]
+    dias_jan = sorted(f["dia"] for f in diario.vigentes([pai], date(2027, 1, 5)))
+    assert dias_jan == [3, 10, 17, 24, 31]
+
+
+def test_fixo_semanal_pago_conta_uma_vez_por_pagamento():
+    # Sábado 05/12: o Pix do domingo 06/12 saiu um dia antes. Faltam 13, 20 e 27.
+    pai = {"nome": "Pai", "valor": 500.00, "semanal": "domingo"}
+    _, faltam, _ = diario.numero_do_dia(5000.0, [pai], date(2026, 12, 5), [500.00])
+    assert sorted(f["dia"] for f in faltam) == [13, 20, 27]

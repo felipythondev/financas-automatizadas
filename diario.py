@@ -101,10 +101,40 @@ def saldo_em_conta(foto: dict) -> float:
     return float(conta["balance"]) if conta else 0.0
 
 
+DIAS_DA_SEMANA = {
+    "segunda": 0,
+    "terça": 1,
+    "quarta": 2,
+    "quinta": 3,
+    "sexta": 4,
+    "sábado": 5,
+    "domingo": 6,
+}
+
+
+def ocorrencias_semanais(fixo: dict, dia: date) -> list[dict]:
+    """Um fixo com `semanal` vira uma ocorrência em cada dia da semana do mês.
+
+    O pai recebe R$ 500 todo domingo: dezembro de 2026 tem 4 domingos, janeiro tem 5.
+    """
+    alvo = DIAS_DA_SEMANA[fixo["semanal"]]
+    dias_no_mes = monthrange(dia.year, dia.month)[1]
+    return [
+        {**fixo, "dia": d}
+        for d in range(1, dias_no_mes + 1)
+        if date(dia.year, dia.month, d).weekday() == alvo
+    ]
+
+
 def vigentes(fixos: list, dia: date) -> list:
     """Os fixos que valem no mês do dia. `de` e `ate` são opcionais, no formato AAAA-MM."""
     mes = f"{dia.year}-{dia.month:02d}"
-    return [f for f in fixos if f.get("de", mes) <= mes <= f.get("ate", mes)]
+    do_mes = [f for f in fixos if f.get("de", mes) <= mes <= f.get("ate", mes)]
+    return [
+        o
+        for f in do_mes
+        for o in (ocorrencias_semanais(f, dia) if "semanal" in f else [f])
+    ]
 
 
 def eh_lancamento_sem_hora(momento: datetime) -> bool:
