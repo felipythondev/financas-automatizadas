@@ -165,3 +165,82 @@ def test_teto_desconta_o_fixo_que_a_foto_mostra_pago(tmp_path, monkeypatch):
 
     # O relatório de 22/11 julga o gasto de 21/11 contra o número da noite de 20/11.
     assert round(diario.teto_de(date(2026, 11, 21), FIXOS_NOV), 2) == 119.26
+
+
+def test_data_de_usa_o_horario_de_porto_alegre():
+    # 21h30 de 20/11 em Porto Alegre é 00h30 de 21/11 em UTC.
+    assert diario.data_de({"date": "2026-11-21T00:30:00.000Z"}) == date(2026, 11, 20)
+
+
+def test_lancamento_sem_hora_fica_no_dia_que_o_banco_informou():
+    # O banco manda lançamentos só com data (IOF, por exemplo) como meia-noite UTC.
+    assert diario.data_de({"date": "2026-09-30T00:00:00.001Z"}) == date(2026, 9, 30)
+
+
+def test_debito_da_noite_do_ultimo_dia_fica_no_mes_anterior():
+    # 22h de 31/10 em Porto Alegre é 01h de 01/11 em UTC: não paga o carro de novembro.
+    foto = {
+        "contas": [{"id": "pf", "type": "BANK"}],
+        "transacoes": {
+            "pf": [
+                {"date": "2026-11-01T01:00:00.000Z", "amount": -2193.27},
+                {"date": "2026-11-21T00:30:00.000Z", "amount": -45.00},
+            ]
+        },
+    }
+    assert diario.debitos_do_mes(foto, date(2026, 11, 20)) == [45.00]
+
+
+def test_relatorio_desconta_os_fixos_ja_pagos(tmp_path, monkeypatch):
+    fixos = tmp_path / "fixos.json"
+    fixos.write_text(diario.json.dumps({"fixos": FIXOS_NOV}), encoding="utf-8")
+    monkeypatch.setattr(diario, "FIXOS", fixos)
+    monkeypatch.setattr(diario, "SNAPSHOTS", tmp_path)
+    foto = {
+        "contas": [{"id": "pf", "type": "BANK", "balance": 1237.56}],
+        "investimentos": [],
+        "transacoes": {
+            "pf": [
+                {
+                    "date": "2026-11-05T00:26:12.602Z",
+                    "amount": -300.00,
+                    "description": "Transferência enviada pelo Pix|Magali",
+                    "categoryId": "05000000",
+                },
+                {
+                    "date": "2026-11-19T11:21:30.717Z",
+                    "amount": -2193.27,
+                    "description": "Pagamento efetuado|BANCO GM S.A.",
+                    "categoryId": "05000000",
+                },
+                {
+                    "date": "2026-11-19T11:55:56.704Z",
+                    "amount": -300.00,
+                    "description": "Transferência enviada pelo Pix|Magali",
+                    "categoryId": "05000000",
+                },
+            ]
+        },
+    }
+    texto = diario.relatorio(foto, date(2026, 11, 20))
+    assert "**R$ 119,26 por dia**" in texto
+
+
+def test_hora_do_gasto_sai_no_horario_de_porto_alegre(tmp_path, monkeypatch):
+    fixos = tmp_path / "fixos.json"
+    fixos.write_text(diario.json.dumps({"fixos": FIXOS_NOV}), encoding="utf-8")
+    monkeypatch.setattr(diario, "FIXOS", fixos)
+    monkeypatch.setattr(diario, "SNAPSHOTS", tmp_path)
+    uber = {
+        "date": "2026-11-19T18:35:00.000Z",
+        "amount": -18.75,
+        "description": "Compra no débito via NuPay|Uber",
+        "categoryId": "05070000",
+    }
+    foto = {
+        "contas": [{"id": "pf", "type": "BANK", "balance": 1237.56}],
+        "investimentos": [],
+        "transacoes": {"pf": [uber]},
+    }
+    texto = diario.relatorio(foto, date(2026, 11, 20))
+    assert "| 15:35 | 18,75 |" in texto

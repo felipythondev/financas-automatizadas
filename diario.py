@@ -15,8 +15,9 @@ repositorio, que e publico.
 import json
 import sys
 from calendar import monthrange
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 from decouple import Config, RepositoryEnv
@@ -27,6 +28,7 @@ NUBANK_ITEM_ID = "09c9a9a6-898d-4ecb-b228-daabb7d8ca6d"
 ENV = Path(__file__).parent / ".env"
 VAULT = Path.home() / "dev/life_os/Pessoal/Finanças"
 SNAPSHOTS = VAULT / "Snapshots"
+FUSO = ZoneInfo("America/Sao_Paulo")
 RELATORIOS = VAULT / "Relatórios"
 FIXOS = VAULT / "fixos.json"
 
@@ -105,8 +107,25 @@ def vigentes(fixos: list, dia: date) -> list:
     return [f for f in fixos if f.get("de", mes) <= mes <= f.get("ate", mes)]
 
 
+def eh_lancamento_sem_hora(momento: datetime) -> bool:
+    """O banco manda lançamentos só com data (IOF, por exemplo) como meia-noite UTC."""
+    return momento.time() < time(0, 0, 1)
+
+
+def momento_de(t: dict) -> datetime:
+    return datetime.fromisoformat(t["date"].replace("Z", "+00:00"))
+
+
 def data_de(t: dict) -> date:
-    return datetime.fromisoformat(t["date"].replace("Z", "+00:00")).date()
+    """O dia do lançamento em Porto Alegre, não em UTC.
+
+    Uma janta às 22h de 25/09 chega como 01h de 26/09 em UTC. Sem converter, o gasto
+    cai no dia seguinte e um débito da noite do dia 31 cai no mês seguinte.
+    """
+    momento = momento_de(t)
+    if eh_lancamento_sem_hora(momento):
+        return momento.date()
+    return momento.astimezone(FUSO).date()
 
 
 def debitos_do_mes(foto: dict, dia: date) -> list[float]:
@@ -172,9 +191,9 @@ def teto_de(dia: date, fixos: list) -> float | None:
     if not arquivo.exists():
         return None
     foto = json.loads(arquivo.read_text(encoding="utf-8"))
-    anteontem = dia - timedelta(days=1)
+    vespera = dia - timedelta(days=1)
     return numero_do_dia(
-        saldo_em_conta(foto), fixos, anteontem, debitos_do_mes(foto, anteontem)
+        saldo_em_conta(foto), fixos, vespera, debitos_do_mes(foto, vespera)
     )[0]
 
 
@@ -270,9 +289,7 @@ def relatorio(foto: dict, hoje: date) -> str:
     if saidas_ontem:
         linhas += ["| Hora | Valor | O quê |", "|---|---:|---|"]
         for t in sorted(saidas_ontem, key=lambda x: x["date"]):
-            hora = datetime.fromisoformat(t["date"].replace("Z", "+00:00")).strftime(
-                "%H:%M"
-            )
+            hora = momento_de(t).astimezone(FUSO).strftime("%H:%M")
             linhas.append(
                 f"| {hora} | {brl(-float(t['amount']))} | {t['description'].strip()} |"
             )
